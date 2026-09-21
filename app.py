@@ -3,10 +3,12 @@
 Based on the original Excel profit calculation workbook.
 Supports AMZ FBM, AMZ FBA, and Walmart WF business lines.
 """
+import io
 import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
 import streamlit as st
+from openpyxl import load_workbook
 
 from calculator import (
     ProductInput,
@@ -17,6 +19,141 @@ from calculator import (
     calc_weight_lbs,
     cm_to_inch,
 )
+
+
+def parse_excel_template(uploaded_file) -> dict:
+    """从上传的 Excel 利润核算表中提取产品信息。
+    自动扫描各计算 Sheet，查找品名、产地、售价、采购成本、包装尺寸等关键字段。
+    """
+    wb = load_workbook(uploaded_file, data_only=True)
+    result = {}
+
+    # 按优先级扫描计算表
+    target_sheets = ["利润核算AMZ+WM", "利润测算FBA-中国工厂", "利润核算WF"]
+    for sname in target_sheets:
+        if sname not in wb.sheetnames:
+            continue
+        ws = wb[sname]
+
+        # 扫描前30行，提取关键字段
+        for row in ws.iter_rows(min_row=1, max_row=30, values_only=False):
+            for cell in row:
+                val = str(cell.value).strip() if cell.value else ""
+                if not val:
+                    continue
+                val_lower = val.lower()
+
+                # 品名
+                if val_lower in ("品名", "产品名称", "product name") and not result.get("name"):
+                    next_cell = ws.cell(row=cell.row, column=cell.column + 1)
+                    if next_cell.value:
+                        result["name"] = str(next_cell.value).strip()
+
+                # 工厂产地
+                if val_lower in ("产地", "工厂所在地", "工厂", "origin") and not result.get("origin"):
+                    for offset in range(1, 4):
+                        next_cell = ws.cell(row=cell.row, column=cell.column + offset)
+                        if next_cell.value and str(next_cell.value).strip() in ("中国", "越南/泰国", "越南", "泰国", "马来西亚"):
+                            origin_val = str(next_cell.value).strip()
+                            if origin_val in ("越南", "泰国"):
+                                origin_val = "越南/泰国"
+                            result["origin"] = origin_val
+                            break
+
+                # 售价
+                if val_lower in ("售价", "售价($)", "price", "售价($)") and not result.get("price"):
+                    for offset in range(1, 4):
+                        next_cell = ws.cell(row=cell.row, column=cell.column + offset)
+                        if isinstance(next_cell.value, (int, float)) and next_cell.value > 0:
+                            result["price"] = float(next_cell.value)
+                            break
+
+                # 采购成本
+                if val_lower in ("采购成本", "采购价", "商品成本", "purchase") and not result.get("purchase"):
+                    for offset in range(1, 4):
+                        next_cell = ws.cell(row=cell.row, column=cell.column + offset)
+                        if isinstance(next_cell.value, (int, float)) and next_cell.value > 0:
+                            result["purchase"] = float(next_cell.value)
+                            break
+
+                # 汇率
+                if val_lower in ("汇率", "exchange rate") and not result.get("rate"):
+                    for offset in range(1, 4):
+                        next_cell = ws.cell(row=cell.row, column=cell.column + offset)
+                        if isinstance(next_cell.value, (int, float)) and next_cell.value > 0:
+                            result["rate"] = float(next_cell.value)
+                            break
+
+                # 箱数
+                if val_lower in ("箱数", "box count") and not result.get("box_count"):
+                    for offset in range(1, 4):
+                        next_cell = ws.cell(row=cell.row, column=cell.column + offset)
+                        if isinstance(next_cell.value, (int, float)) and next_cell.value > 0:
+                            result["box_count"] = int(next_cell.value)
+                            break
+
+                # 配送区间
+                if val_lower in ("zone", "配送区间", "配送区域") and not result.get("zone"):
+                    for offset in range(1, 4):
+                        next_cell = ws.cell(row=cell.row, column=cell.column + offset)
+                        if isinstance(next_cell.value, (int, float)) and next_cell.value in (3, 4, 5):
+                            result["zone"] = int(next_cell.value)
+                            break
+
+                # 包装尺寸 - 长
+                if val_lower in ("长(cm)", "长", "length", "长度") and not result.get("length"):
+                    for offset in range(1, 4):
+                        next_cell = ws.cell(row=cell.row, column=cell.column + offset)
+                        if isinstance(next_cell.value, (int, float)) and next_cell.value > 0:
+                            result["length"] = float(next_cell.value)
+                            break
+
+                # 包装尺寸 - 宽
+                if val_lower in ("宽(cm)", "宽", "width") and not result.get("width"):
+                    for offset in range(1, 4):
+                        next_cell = ws.cell(row=cell.row, column=cell.column + offset)
+                        if isinstance(next_cell.value, (int, float)) and next_cell.value > 0:
+                            result["width"] = float(next_cell.value)
+                            break
+
+                # 包装尺寸 - 高
+                if val_lower in ("高(cm)", "高", "height") and not result.get("height"):
+                    for offset in range(1, 4):
+                        next_cell = ws.cell(row=cell.row, column=cell.column + offset)
+                        if isinstance(next_cell.value, (int, float)) and next_cell.value > 0:
+                            result["height"] = float(next_cell.value)
+                            break
+
+                # 重量
+                if val_lower in ("重量(kg)", "重量", "weight", "毛重(kg)") and not result.get("weight"):
+                    for offset in range(1, 4):
+                        next_cell = ws.cell(row=cell.row, column=cell.column + offset)
+                        if isinstance(next_cell.value, (int, float)) and next_cell.value > 0:
+                            result["weight"] = float(next_cell.value)
+                            break
+
+        if result:
+            break
+
+    # 设置默认值
+    defaults = {
+        "name": "导入产品",
+        "origin": "中国",
+        "price": 159.99,
+        "purchase": 450.0,
+        "rate": 7.0,
+        "box_count": 1,
+        "zone": 5,
+        "length": 170.0,
+        "width": 50.0,
+        "height": 12.0,
+        "weight": 36.0,
+    }
+    for k, v in defaults.items():
+        if k not in result:
+            result[k] = v
+
+    return result
 
 st.set_page_config(
     page_title="新品利润核算工具",
@@ -64,51 +201,108 @@ st.markdown(
 
 
 # ============================================================
-# Sidebar: Product Input Form
+# 默认值
+# ============================================================
+defaults = {
+    "name": "示例产品",
+    "origin": "中国",
+    "zone": 5,
+    "box_count": 1,
+    "price": 159.99,
+    "purchase": 450.0,
+    "rate": 7.0,
+    "length": 170.0,
+    "width": 50.0,
+    "height": 12.0,
+    "weight": 36.0,
+}
+
+# ============================================================
+# Sidebar: Excel 模板导入
+# ============================================================
+st.sidebar.markdown("### 导入 Excel 模板")
+st.sidebar.caption("上传利润核算表 .xlsx，自动提取产品信息")
+
+uploaded_file = st.sidebar.file_uploader(
+    "选择 Excel 文件",
+    type=["xlsx", "xls"],
+    key="excel_upload",
+    help="支持原始利润核算表格式，自动提取品名/产地/售价/采购成本/包装尺寸等字段",
+)
+
+if uploaded_file is not None:
+    try:
+        parsed = parse_excel_template(uploaded_file)
+        defaults.update(parsed)
+        st.sidebar.success(f"已导入: {defaults.get('name', '未知产品')}")
+        with st.sidebar.expander("查看提取的字段"):
+            display_fields = {
+                "品名": defaults.get("name"),
+                "产地": defaults.get("origin"),
+                "售价": defaults.get("price"),
+                "采购成本": defaults.get("purchase"),
+                "汇率": defaults.get("rate"),
+                "箱数": defaults.get("box_count"),
+                "配送区间": defaults.get("zone"),
+                "长(cm)": defaults.get("length"),
+                "宽(cm)": defaults.get("width"),
+                "高(cm)": defaults.get("height"),
+                "重量(kg)": defaults.get("weight"),
+            }
+            for label, val in display_fields.items():
+                st.sidebar.text(f"{label}: {val}")
+    except Exception as e:
+        st.sidebar.error(f"导入失败: {e}")
+
+st.sidebar.markdown("---")
+
+# ============================================================
+# Sidebar: 手动填写产品信息
 # ============================================================
 st.sidebar.markdown("### 产品信息录入")
-st.sidebar.caption("白色单元格需手动填写，灰色自动计算")
+st.sidebar.caption("导入模板后自动填充，也可手动修改")
 
-product_name = st.sidebar.text_input("品名", value="示例产品", key="name")
+product_name = st.sidebar.text_input("品名", value=defaults["name"], key="name")
 
 origin = st.sidebar.selectbox(
     "工厂所在地",
     ["中国", "越南/泰国", "马来西亚"],
+    index=["中国", "越南/泰国", "马来西亚"].index(defaults["origin"]) if defaults["origin"] in ["中国", "越南/泰国", "马来西亚"] else 0,
     key="origin",
     help="中国工厂按人民币÷汇率；越南/泰国/马来西亚按美元÷1.1含退税",
 )
 
-zone = st.sidebar.selectbox("配送区间", [3, 4, 5], index=2, key="zone", help="产品开发阶段默认Zone5")
+zone = st.sidebar.selectbox("配送区间", [3, 4, 5], index=[3, 4, 5].index(defaults["zone"]) if defaults["zone"] in [3, 4, 5] else 2, key="zone", help="产品开发阶段默认Zone5")
 
-box_count = st.sidebar.number_input("箱数", min_value=1, max_value=10, value=1, key="box_count")
+box_count = st.sidebar.number_input("箱数", min_value=1, max_value=10, value=defaults["box_count"], key="box_count")
 
-price = st.sidebar.number_input("售价 ($)", min_value=0.01, value=159.99, step=10.0, key="price")
+price = st.sidebar.number_input("售价 ($)", min_value=0.01, value=defaults["price"], step=10.0, key="price")
 
 purchase_price = st.sidebar.number_input(
     "采购成本",
     min_value=0.01,
-    value=450.0,
+    value=defaults["purchase"],
     step=50.0,
     key="purchase",
     help="中国工厂填人民币；海外工厂填美元",
 )
 
-exchange_rate = st.sidebar.number_input("汇率", min_value=1.0, value=7.0, step=0.1, key="rate")
+exchange_rate = st.sidebar.number_input("汇率", min_value=1.0, value=defaults["rate"], step=0.1, key="rate")
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 包装数据")
 
 col1, col2 = st.sidebar.columns(2)
 with col1:
-    length_cm = st.number_input("长 (cm)", min_value=1.0, value=170.0, step=1.0, key="length")
+    length_cm = st.number_input("长 (cm)", min_value=1.0, value=defaults["length"], step=1.0, key="length")
 with col2:
-    width_cm = st.number_input("宽 (cm)", min_value=1.0, value=50.0, step=1.0, key="width")
+    width_cm = st.number_input("宽 (cm)", min_value=1.0, value=defaults["width"], step=1.0, key="width")
 
 col3, col4 = st.sidebar.columns(2)
 with col3:
-    height_cm = st.number_input("高 (cm)", min_value=1.0, value=12.0, step=1.0, key="height")
+    height_cm = st.number_input("高 (cm)", min_value=1.0, value=defaults["height"], step=1.0, key="height")
 with col4:
-    weight_kg = st.number_input("重量 (kg)", min_value=0.1, value=36.0, step=1.0, key="weight")
+    weight_kg = st.number_input("重量 (kg)", min_value=0.1, value=defaults["weight"], step=1.0, key="weight")
 
 
 # Build ProductInput
